@@ -1,0 +1,10 @@
+File
+  Open
+  Save
+  Export As
+    PNG
+    JPG
+    GIF
+  Close
+Edit
+View
