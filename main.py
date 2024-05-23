@@ -9,9 +9,10 @@ from PyQt5.QtCore import *
 
 LOG = logging.getLogger(__name__)
 
-class NavItem(QFrame):
+class NavItem(QWidget):
     def __init__(self, text=None, parent=None):
         super().__init__(parent)
+        self.setProperty("class", ["navitem"])
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.NoFocus)
@@ -20,21 +21,24 @@ class NavItem(QFrame):
 
         self.menu: Optional["NavMenu"] = None
 
+        self.activated = False
+
+    def setActivated(self, activated: bool):
+        self.activated = activated
+        self.update()
+
     def sizeHint(self):
-        return QSize(60, 20)
+        return QSize(120, 40)
 
     def set_menu(self, menu):
         self.menu = menu
 
     def paintEvent(self, event: QPaintEvent):
         painter = QPainter(self)
+        if self.activated:
+            painter.fillRect(event.rect(), QColor(255, 0, 0, 200))
         painter.drawRect(self.rect())
         painter.drawText(event.rect(), Qt.AlignCenter, self.text)
-
-    def mouseMoveEvent(self, event: QMouseEvent):
-        # LOG.debug('mouseMoveEvent: %s, pos: %s', self, event.pos())
-        super().mouseMoveEvent(event)
-        pass
 
     def __repr__(self):
         return f"<NavItem(text={self.text}, at {id(self)})>"
@@ -57,6 +61,9 @@ class NavMenu(QWidget):
         self.active_menu: Optional[NavMenu] = None
 
         self.causedPopup = CausedPopup()
+
+        # 点击项 / triggered action
+        self.sync_item: Optional[NavItem] = None
 
         # UI
         self.lt = QHBoxLayout()
@@ -81,8 +88,10 @@ class NavMenu(QWidget):
 
         return menu
 
-    def set_active_item(self, item: NavItem, popup: int, reason=None, activateFirst: bool=False):
+    def set_active_item(self, item: Optional[NavItem], popup: int = -1, reason=None, activateFirst: bool = False):
         """
+        选中菜单项
+
         :param item:
         :param popup:
                 popup == -1 means do not popup, 0 means immediately, others mean use a timer
@@ -90,13 +99,25 @@ class NavMenu(QWidget):
         :param activateFirst:
         :return:
         """
-        if self.active_item:
-            pass
-
-        if item.menu and popup == 0:
-            self.popupItem(item)
-
+        LOG.debug("set active item: %s", item)
+        hide_active_menu = self.active_menu
+        prev_item = self.active_item
         self.active_item = item
+        if item:
+            item.setActivated(True)
+
+        if prev_item and prev_item != self.active_item:
+            prev_item.setActivated(False)
+
+        if hide_active_menu and prev_item != self.active_item:
+            if popup == -1:
+                self.hideMenu(hide_active_menu)
+            return
+
+        # 弹出子菜单
+        if item and item.menu and popup != -1:
+            LOG.debug("popup item: %s", item)
+            self.popupItem(item)
 
     def item_at(self, pos: QPoint):
         for item in self.items:
@@ -110,7 +131,7 @@ class NavMenu(QWidget):
         caused = self.causedPopup.widget
         while caused is not None:
             cpos = caused.mapFromGlobal(e.globalPos())
-            if caused.rect().contains(cpos):
+            if caused.rect().contains(cpos) and e.type() != QEvent.MouseButtonRelease:
                 new_e = QMouseEvent(e.type(), cpos, caused.mapTo(caused.window(), cpos), e.screenPos(),
                 e.button(), e.buttons(), e.modifiers(), e.source())
                 QApplication.sendEvent(caused, new_e)
@@ -121,6 +142,7 @@ class NavMenu(QWidget):
         return False
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        # 只处理当前菜单区域的事件
         if not self.isVisible() or self.mouseEventTaken(e):
             return
 
@@ -129,7 +151,24 @@ class NavMenu(QWidget):
 
         LOG.debug('mouseMoveEvent: %s, hasMouse: %s, item: %s', self.text, hasMouse, item)
         if item is not None:
-            self.set_active_item(item, 0)
+            # if self.active_item is None or self.active_item.menu is None or not self.active_item.menu.isVisible():
+            #     self.set_active_item(item)
+            if item.menu is not None:
+                if not item.menu.isVisible():
+                    # 弹出子菜单
+                    self.set_active_item(item, 0)
+                else:
+                    # 取消子菜单中选中项
+                    item.menu.set_active_item(None)
+            else:
+                # 选中菜单项
+                self.set_active_item(item)
+            return
+        # else:
+        #     self.set_active_item(None)
+
+        if self.active_menu:
+            self.active_menu.set_active_item(None)
 
         return super().mouseMoveEvent(e)
 
@@ -137,28 +176,63 @@ class NavMenu(QWidget):
         LOG.debug('mousePressEvent: %s - %s', self.text, e.pos())
         if not self.isVisible() or self.mouseEventTaken(e):
             return
-        pass
+
+        self.setSyncItem()
+        item = self.item_at(e.pos())
+        if item is not None and item == self.active_item:
+            self.set_active_item(item, 0)
+        elif item is None or item.isEnabled:
+            self.hideUpToMenuBar()
+
+        super().mousePressEvent(e)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
         LOG.debug('mouseReleaseEvent: %s - %s', self.text, e.pos())
         if not self.isVisible() or self.mouseEventTaken(e):
             return
 
-    def eventFilter(self, obj, e):
-        type = e.type()
-        if type == QEvent.Enter:
-            LOG.debug("enter %s", obj.text())
-            self.set_active_item(obj)
-        elif type == QEvent.Leave:
-            LOG.debug("leave %s", obj.text())
+        item = self.item_at(e.pos())
+        if item is not None and item.menu is None and item == self.active_item:
+            self.setSyncItem()
+            self.hideUpToMenuBar()
+            pass
 
-        return super().eventFilter(obj, e)
+        super().mouseReleaseEvent(e)
+
+    def setSyncItem(self):
+        item = self.active_item
+        if item is not None and (not item.isEnabled() or item.menu is not None):
+            item = None
+
+        caused = self
+        while caused is not None:
+            if caused._eventloop is not None:
+                caused.sync_item = item
+                break
+            caused = caused.causedPopup.widget
+
+    def hideUpToMenuBar(self):
+        """
+        关闭菜单
+        """
+        caused = self.causedPopup.widget
+        self.hideMenu(self)
+        while caused is not None:
+            LOG.debug("hide menu: %s", caused.text)
+            next = caused.causedPopup.widget
+            self.hideMenu(caused)
+            caused = next
 
     def hideMenu(self, menu: "NavMenu"):
         if menu:
-            menu.causedPopup.widget = None
+            if self.active_menu == menu:
+                self.active_menu = None
+
             menu.causedPopup.item = None
             menu.close()
+            menu.causedPopup.widget = None
+
+            menu.set_active_item(None)
         pass
 
     def hideEvent(self, e: QHideEvent) -> None:
@@ -172,7 +246,10 @@ class NavMenu(QWidget):
         self.causedPopup.item = None
 
     def popupItem(self, item: NavItem):
-        pos = self.mapToGlobal(item.geometry().bottomLeft())
+        pos = self.mapToGlobal(item.geometry().bottomLeft()) + QPoint(-20, 40)
+
+        if self.active_menu and self.active_menu != item.menu:
+            self.hideMenu(self.active_menu)
 
         self.active_menu = item.menu
 
@@ -191,6 +268,11 @@ class NavMenu(QWidget):
 
         self._eventloop = QEventLoop()
         self._eventloop.exec_()
+
+        LOG.debug("menu exited: %s", self.sync_item)
+
+    def __repr__(self):
+        return f"<NavMenu {self.text} at {id(self)}>"
 
 
 class MainWindow(QMainWindow):
@@ -222,6 +304,16 @@ class MainWindow(QMainWindow):
         
         menu.exec_()
 
+qss = """
+.navitem {
+  background-color: "white";
+}
+
+.navitem:hover {
+  background-color: "red";
+}
+"""
+
 
 if __name__ == '__main__':
     import signal
@@ -230,6 +322,7 @@ if __name__ == '__main__':
     LOG.setLevel(logging.DEBUG)
 
     app = QApplication(sys.argv)
+    # app.setStyleSheet(qss)
 
     w = MainWindow()
     w.show()
